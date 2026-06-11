@@ -1,0 +1,369 @@
+PULSE nano64-repo
+FILE nano64/index.html
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>nano64 Engine Demo</title>
+  <style>
+    body {
+      margin:0;
+      background:#000;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      height:100vh;
+      font-family:sans-serif;
+    }
+    .tv-shell {
+      background:#111;
+      padding:24px 32px;
+      border-radius:32px;
+      box-shadow:0 0 40px #0f0;
+      border:4px solid #333;
+      position:relative;
+    }
+    .tv-screen {
+      width:640px;
+      height:480px; /* 4:3 */
+      background:#020308;
+      border-radius:12px;
+      overflow:hidden;
+      border:3px solid #222;
+      position:relative;
+    }
+    canvas { display:block; }
+    .scanlines {
+      pointer-events:none;
+      position:absolute;
+      inset:0;
+      background:repeating-linear-gradient(
+        to bottom,
+        rgba(255,255,255,0.04) 0px,
+        rgba(255,255,255,0.04) 1px,
+        rgba(0,0,0,0.0) 2px,
+        rgba(0,0,0,0.0) 3px
+      );
+      mix-blend-mode:soft-light;
+    }
+    .tv-label {
+      position:absolute;
+      right:24px;
+      bottom:10px;
+      color:#0f0;
+      font-size:10px;
+      letter-spacing:2px;
+      text-transform:uppercase;
+      opacity:0.7;
+    }
+  </style>
+</head>
+<body>
+  <div class="tv-shell">
+    <div class="tv-screen">
+      <canvas id="view" width="640" height="480"></canvas>
+      <div class="scanlines"></div>
+    </div>
+    <div class="tv-label">nano64</div>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
+END
+FILE nano64/main.js
+import { createZBuffer } from './gfx/zbuffer.js';
+import { createRaster } from './gfx/raster.js';
+import { createKeyState } from './core/input.js';
+import { createNano64Engine } from './core/nano64.js';
+import { renderPark } from './demo/parkScene.js';
+
+const canvas = document.getElementById('view');
+const ctx = canvas.getContext('2d');
+
+const W = canvas.width;
+const H = canvas.height;
+
+const zbuf = createZBuffer(W, H);
+const raster = createRaster(ctx, W, H, zbuf);
+const keys = createKeyState();
+const engine = createNano64Engine(canvas, ctx, zbuf, raster, keys);
+
+let lastTime = performance.now();
+
+function frame(t) {
+  const dt = (t - lastTime) / 1000;
+  lastTime = t;
+
+  engine.update(dt);
+  engine.clearScreen();
+
+  zbuf.clear();
+  raster.beginFrame();
+  renderPark(engine);
+  raster.endFrame();
+
+  requestAnimationFrame(frame);
+}
+
+requestAnimationFrame(frame);
+END
+FILE nano64/math/math.js
+export function vec3(x, y, z) { return { x, y, z }; }
+export function sub(a, b) { return vec3(a.x - b.x, a.y - b.y, a.z - b.z); }
+export function dot(a, b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+export function length(v) { return Math.sqrt(dot(v, v)); }
+export function norm(v) {
+  const l = length(v) || 1;
+  return vec3(v.x / l, v.y / l, v.z / l);
+}
+export function rotY(v, ang) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  return vec3(
+    v.x * c + v.z * s,
+    v.y,
+    -v.x * s + v.z * c
+  );
+}
+END
+FILE nano64/core/camera.js
+import { vec3, sub } from '../math/math.js';
+
+export function createCamera() {
+  return { x:0, y:1.0, z:-5, yaw:0, pitch:0 };
+}
+
+export function worldToCamera(p, cam) {
+  const rel = sub(p, cam);
+  const c = Math.cos(-cam.yaw), s = Math.sin(-cam.yaw);
+  return vec3(
+    rel.x * c + rel.z * s,
+    rel.y,
+    -rel.x * s + rel.z * c
+  );
+}
+
+export function makeProjector(width, height, hfov = Math.PI/3) {
+  const W = width, H = height;
+  const HFOV = hfov;
+  const VFOV = HFOV * (H / W);
+  return function project(p) {
+    if (p.z <= 0.01) return null;
+    const xN = p.x / (p.z * Math.tan(HFOV/2));
+    const yN = p.y / (p.z * Math.tan(VFOV/2));
+    return {
+      x: (xN * 0.5 + 0.5) * W,
+      y: (-yN * 0.5 + 0.5) * H,
+      z: p.z
+    };
+  };
+}
+END
+FILE nano64/gfx/zbuffer.js
+export function createZBuffer(width, height) {
+  const size = width * height;
+  const zbuf = new Float32Array(size);
+  function clear() {
+    for (let i = 0; i < size; i++) zbuf[i] = Infinity;
+  }
+  return { data: zbuf, clear };
+}
+END
+FILE nano64/gfx/raster.js
+export function createRaster(ctx, width, height, zbuf) {
+  let imgData = null;
+  let data = null;
+
+  function beginFrame() {
+    imgData = ctx.getImageData(0, 0, width, height);
+    data = imgData.data;
+  }
+
+  function endFrame() {
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  function drawTri(p0, p1, p2, color) {
+    const minX = Math.max(0, Math.floor(Math.min(p0.x, p1.x, p2.x)));
+    const maxX = Math.min(width - 1, Math.ceil(Math.max(p0.x, p1.x, p2.x)));
+    const minY = Math.max(0, Math.floor(Math.min(p0.y, p1.y, p2.y)));
+    const maxY = Math.min(height - 1, Math.ceil(Math.max(p0.y, p1.y, p2.y)));
+
+    const area =
+      (p1.x - p0.x) * (p2.y - p0.y) -
+      (p2.x - p0.x) * (p1.y - p0.y);
+    if (area === 0) return;
+
+    const zAvg = (p0.z + p1.z + p2.z) / 3;
+
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        const w0 =
+          (p1.x - p0.x) * (y - p0.y) -
+          (p1.y - p0.y) * (x - p0.x);
+        const w1 =
+          (p2.x - p1.x) * (y - p1.y) -
+          (p2.y - p1.y) * (x - p1.x);
+        const w2 =
+          (p0.x - p2.x) * (y - p2.y) -
+          (p0.y - p2.y) * (x - p2.x);
+
+        if ((w0 >= 0 && w1 >= 0 && w2 >= 0) ||
+            (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+
+          const idx = y * width + x;
+          if (zAvg < zbuf.data[idx]) {
+            zbuf.data[idx] = zAvg;
+            const di = idx * 4;
+            data[di]     = color.r;
+            data[di + 1] = color.g;
+            data[di + 2] = color.b;
+            data[di + 3] = 255;
+          }
+        }
+      }
+    }
+  }
+
+  function drawQuad(p0, p1, p2, p3, color) {
+    drawTri(p0, p1, p2, color);
+    drawTri(p0, p2, p3, color);
+  }
+
+  return { beginFrame, endFrame, drawTri, drawQuad };
+}
+END
+FILE nano64/core/input.js
+export function createKeyState() {
+  const keys = {};
+  window.addEventListener('keydown', e => { keys[e.key] = true; });
+  window.addEventListener('keyup',   e => { keys[e.key] = false; });
+  return keys;
+}
+END
+FILE nano64/core/nano64.js
+import { vec3, norm, rotY } from '../math/math.js';
+import { worldToCamera, makeProjector } from './camera.js';
+
+export function createNano64Engine(canvas, ctx, zbuf, raster, keys) {
+  const W = canvas.width;
+  const H = canvas.height;
+  const project = makeProjector(W, H);
+  const cam = { x:0, y:1.0, z:-5, yaw:0, pitch:0 };
+
+  function quad3D(a, b, c, d, hex) {
+    const ca = worldToCamera(a, cam);
+    const cb = worldToCamera(b, cam);
+    const cc = worldToCamera(c, cam);
+    const cd = worldToCamera(d, cam);
+
+    const pa = project(ca);
+    const pb = project(cb);
+    const pc = project(cc);
+    const pd = project(cd);
+
+    if (!pa || !pb || !pc || !pd) return;
+
+    const color = {
+      r: parseInt(hex.slice(1, 3), 16),
+      g: parseInt(hex.slice(3, 5), 16),
+      b: parseInt(hex.slice(5, 7), 16)
+    };
+
+    raster.drawQuad(pa, pb, pc, pd, color);
+  }
+
+  function update(dt) {
+    const speed = 4.0;
+    const rotSpeed = 1.8;
+
+    if (keys['ArrowLeft'])  cam.yaw -= rotSpeed * dt;
+    if (keys['ArrowRight']) cam.yaw += rotSpeed * dt;
+
+    let move = vec3(0,0,0);
+    if (keys['w'] || keys['W']) move.z += 1;
+    if (keys['s'] || keys['S']) move.z -= 1;
+    if (keys['a'] || keys['A']) move.x -= 1;
+    if (keys['d'] || keys['D']) move.x += 1;
+
+    if (move.x !== 0 || move.z !== 0) {
+      move = norm(move);
+      const mWorld = rotY(move, cam.yaw);
+      cam.x += mWorld.x * speed * dt;
+      cam.z += mWorld.z * speed * dt;
+    }
+  }
+
+  function clearScreen() {
+    const skyGrad = ctx.createLinearGradient(0,0,0,H);
+    skyGrad.addColorStop(0,'#101020');
+    skyGrad.addColorStop(1,'#203040');
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0,0,W,H);
+  }
+
+  return { quad3D, update, clearScreen, cam };
+}
+END
+FILE nano64/gfx/scene.js
+import { vec3 } from '../math/math.js';
+
+export function drawGround(quad3D) {
+  const size = 40;
+  quad3D(
+    vec3(-size, 0, -size),
+    vec3( size, 0, -size),
+    vec3( size, 0,  size),
+    vec3(-size, 0,  size),
+    '#1b3b1b'
+  );
+}
+
+export function drawTree(quad3D, baseX, baseZ) {
+  const trunkH = 2.0;
+  const trunkR = 0.2;
+
+  const y0 = 0.0;
+  const y1 = trunkH;
+  const x0 = baseX - trunkR, x1 = baseX + trunkR;
+  const z0 = baseZ - trunkR, z1 = baseZ + trunkR;
+
+  const trunkColor = '#5b3a1a';
+
+  quad3D(vec3(x0,y0,z0), vec3(x1,y0,z0), vec3(x1,y1,z0), vec3(x0,y1,z0), trunkColor);
+  quad3D(vec3(x1,y0,z0), vec3(x1,y0,z1), vec3(x1,y1,z1), vec3(x1,y1,z0), trunkColor);
+  quad3D(vec3(x1,y0,z1), vec3(x0,y0,z1), vec3(x0,y1,z1), vec3(x1,y1,z1), trunkColor);
+  quad3D(vec3(x0,y0,z1), vec3(x0,y0,z0), vec3(x0,y1,z0), vec3(x0,y1,z1), trunkColor);
+
+  quad3D(
+    vec3(x0,y0,z0),
+    vec3(x1,y0,z0),
+    vec3(x1,y0,z1),
+    vec3(x0,y0,z1),
+    trunkColor
+  );
+
+  const leafY0 = y1 - 0.001;
+  const leafY1 = y1 + 1.5;
+  const leafR = 1.0;
+  const lx0 = baseX - leafR, lx1 = baseX + leafR;
+  const lz0 = baseZ - leafR, lz1 = baseZ + leafR;
+  const leafColor = '#2f7f2f';
+
+  quad3D(vec3(lx0,leafY0,lz0), vec3(lx1,leafY0,lz0), vec3(lx1,leafY1,lz0), vec3(lx0,leafY1,lz0), leafColor);
+  quad3D(vec3(lx1,leafY0,lz0), vec3(lx1,leafY0,lz1), vec3(lx1,leafY1,lz1), vec3(lx1,leafY1,lz0), leafColor);
+  quad3D(vec3(lx1,leafY0,lz1), vec3(lx0,leafY0,lz1), vec3(lx0,leafY1,lz1), vec3(lx1,leafY1,lz1), leafColor);
+  quad3D(vec3(lx0,leafY0,lz1), vec3(lx0,leafY0,lz0), vec3(lx0,leafY1,lz0), vec3(lx0,leafY1,lz1), leafColor);
+  quad3D(vec3(lx0,leafY1,lz0), vec3(lx1,leafY1,lz0), vec3(lx1,leafY1,lz1), vec3(lx0,leafY1,lz1), leafColor);
+}
+END
+FILE nano64/demo/parkScene.js
+import { drawGround, drawTree } from '../gfx/scene.js';
+
+export function renderPark(engine) {
+  drawGround(engine.quad3D);
+  drawTree(engine.quad3D, 0, 5);
+  drawTree(engine.quad3D, -4, 8);
+  drawTree(engine.quad3D, 4, 10);
+}
+END
+ENDPULSE

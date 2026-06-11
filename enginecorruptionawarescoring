@@ -1,0 +1,161 @@
+// =========================================================
+// ATOMICOMM ZERO CIRCLE QUANTITATIVE ENGINE
+// with Corruption-Aware Scoring
+// =========================================================
+
+// -----------------------------
+// Vector utilities
+// -----------------------------
+function dot(a, b) {
+    let s = 0;
+    const n = Math.min(a.length, b.length);
+    for (let i = 0; i < n; i++) s += a[i] * b[i];
+    return s;
+}
+
+function normalizeVec(v) {
+    const mag = Math.sqrt(dot(v, v)) || 1;
+    return v.map(x => x / mag);
+}
+
+// -----------------------------
+// Zero Circle + HSN layer
+// -----------------------------
+
+// Zero Circle inversion rule: f(x) = -y
+function zeroCircleTransform(x, y) {
+    return -y;
+}
+
+// High-Sensitivity Normalization (HSN)
+function hsnNormalize(value) {
+    return value / (1 + Math.abs(value));
+}
+
+// -----------------------------
+// Corruption risk model
+// -----------------------------
+/**
+ * riskModel
+ * Models corruption risk from I/O and VM pressure.
+ *
+ * @param {object} sys - system metrics for this engine mode
+ *   {number} diskReads      - relative disk reads per query (0..1+)
+ *   {number} vmPressure     - virtual memory pressure (0..1+)
+ *   {number} crawlerFactor  - crawler intensity (0..1), 0 for Atomicomm
+ */
+function riskModel(sys) {
+    const alpha = 0.5;  // weight for disk reads
+    const beta  = 0.3;  // weight for VM pressure
+    const gamma = 0.7;  // weight for crawler intensity
+
+    const { diskReads, vmPressure, crawlerFactor } = sys;
+
+    const risk =
+        alpha * diskReads +
+        beta  * vmPressure +
+        gamma * crawlerFactor;
+
+    return risk; // higher = more corruption risk
+}
+
+// -----------------------------
+// Atomicomm kernel (semantic certainty)
+// -----------------------------
+/**
+ * atomicommKernel
+ * Quantitative certainty score between query and document.
+ *
+ * @param {number[]} queryVec - normalized query vector
+ * @param {number[]} docVec   - normalized document vector
+ * @returns {number} score    - Atomicomm certainty score
+ */
+function atomicommKernel(queryVec, docVec) {
+    let score = 0;
+    const n = Math.min(queryVec.length, docVec.length);
+
+    for (let i = 0; i < n; i++) {
+        const x = queryVec[i];
+        const y = docVec[i];
+
+        // Zero Circle inversion field
+        const inverted = zeroCircleTransform(x, y);
+
+        // Local delta (derivative-like change)
+        const delta = inverted - y; // = -2y
+
+        // HSN stabilization
+        const normalized = hsnNormalize(delta);
+
+        score += normalized;
+    }
+
+    return score;
+}
+
+// -----------------------------
+// Corruption-aware wrapper
+// -----------------------------
+/**
+ * corruptionAwareScore
+ * Combines semantic certainty with corruption avoidance.
+ *
+ * @param {number} baseScore - semantic Atomicomm score
+ * @param {object} sys       - system metrics (see riskModel)
+ * @param {number} lambda    - penalty strength for risk
+ */
+function corruptionAwareScore(baseScore, sys, lambda = 1.0) {
+    const risk = riskModel(sys);
+    // Lower risk => less penalty => higher final score
+    return baseScore - lambda * risk;
+}
+
+// -----------------------------
+// Atomicomm search engine core
+// -----------------------------
+/**
+ * atomicommSearch
+ * Runs a small crawler-like refinement loop over documents,
+ * then applies corruption-aware scoring.
+ *
+ * @param {number[]} queryVec        - raw query vector
+ * @param {number[][]} documents     - array of raw document vectors
+ * @param {number} iterations        - refinement passes
+ * @param {object} sys               - system metrics for this engine mode
+ * @returns {{scores:number[], order:number[]}} result
+ */
+function atomicommSearch(queryVec, documents, iterations = 4, sys = null) {
+    const q = normalizeVec(queryVec);
+    const docs = documents.map(normalizeVec);
+
+    // Default: Atomicomm-style low-risk system
+    const systemMetrics = sys || {
+        diskReads: 0.1,      // very low disk I/O
+        vmPressure: 0.1,     // low VM usage
+        crawlerFactor: 0.0   // no crawler
+    };
+
+    let baseScores = docs.map(() => 0);
+
+    for (let step = 0; step < iterations; step++) {
+        baseScores = docs.map(docVec => atomicommKernel(q, docVec));
+    }
+
+    // Apply corruption-aware adjustment
+    const finalScores = baseScores.map(s =>
+        corruptionAwareScore(s, systemMetrics, 0.5) // lambda=0.5 as example
+    );
+
+    // Rank documents by score (descending)
+    const order = finalScores
+        .map((s, i) => ({ s, i }))
+        .sort((a, b) => b.s - a.s)
+        .map(o => o.i);
+
+    return { scores: finalScores, order };
+}
+
+// -----------------------------
+// Example usage
+// -----------------------------
+const query = [0.8, 0
